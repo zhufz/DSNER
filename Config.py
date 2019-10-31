@@ -27,8 +27,8 @@ class Config():
         '''
         self.maxlen = 75 
 
-		# save and reload path
-	    self.modelpath = r'Model/best_model.ckpt'
+        # save and reload path
+        self.modelpath = r'Model/best_model.ckpt'
         self.modeldir = r'Model/'
 
         '''
