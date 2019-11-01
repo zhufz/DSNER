@@ -1,3 +1,4 @@
+# coding: utf-8
 import codecs
 import os
 import math
@@ -82,6 +83,7 @@ class LSTM_CRF_PA(object):
             pass
         else:
             self.tags_scores = tf.reshape(self.logits, [self.batch_size, self.num_steps, self.num_classes])
+            #self.transitions: (13,13)
             self.transitions = tf.get_variable("transitions", [self.num_classes + 1, self.num_classes + 1])
             dummy_val = -1000
             class_pad = tf.Variable(dummy_val * np.ones((self.batch_size, self.num_steps, 1)), dtype=tf.float32)
@@ -92,6 +94,9 @@ class LSTM_CRF_PA(object):
             begin_vec = tf.reshape(begin_vec, [self.batch_size, 1, self.num_classes + 1])
             end_vec = tf.reshape(end_vec, [self.batch_size, 1, self.num_classes + 1])
             
+            #begin_vec:(64,1,13)
+            #end_vec:(64,1,13)
+            #self.observations: (64,75,13)
             self.observations = tf.concat([begin_vec, self.observations, end_vec], 1)
             
             self.mask = tf.cast(tf.reshape(tf.sign(self.targets),[self.batch_size * self.num_steps]), tf.float32)
@@ -121,39 +126,56 @@ class LSTM_CRF_PA(object):
     def logsumexp(self, x, axis=None):
         x_max = tf.reduce_max(x, reduction_indices=axis, keep_dims=True)
         x_max_ = tf.reduce_max(x, reduction_indices=axis)
+        #在x的的每一列计算logsumexp，其中将每一列的最大值作为flag，用于解决指数运算的问题
         return x_max_ + tf.log(tf.reduce_sum(tf.exp(x - x_max), reduction_indices=axis))
 
     def logsumexp_PA(self, x, pre_real_tags, islast=False):
+        #import pdb
+        #pdb.set_trace()
+        #x: (64,13,13)
+        #pre_real_tags: (64,13)
         result = []
+
+
+        #从第一列到第二列组成的转移矩阵，标签为第一列的标签，计算logsumexp
         for i in range(self.batch_size):
+            #(13,13)的转移矩阵每列的最大值
             x_max = tf.reduce_max(x[i,:,:], reduction_indices=0, keep_dims=True)
             x_max_ = tf.reduce_max(x[i,:,:], reduction_indices=0)
-            b_select = tf.cast(pre_real_tags[i], dtype=tf.bool)
-            select = tf.where(b_select)
+            b_select = tf.cast(pre_real_tags[i], dtype=tf.bool) #bool, 长度13
+            select = tf.where(b_select) #onehot，值为1的位置
             select = tf.reshape(select,[-1])
+            #从起点出发到其他任一点的分数,select为正确的label位置
+            #相当于从(13,13)的矩阵中，取出select对应的那一行
             sample = tf.gather(x[i,:,:], select)
             result.append(x_max_ + tf.log(tf.reduce_sum(tf.exp(sample - x_max), reduction_indices=0)))
-        
+
         if islast==False:
             result = tf.reshape(tf.concat(result, 0),[self.batch_size, self.num_classes+1])
         else:
             result = tf.reshape(tf.concat(result, 0),[self.batch_size])
         return result
-        
-        
 
     def PA_forward(self, observations, transitions, length, y_PA_batch):
+
+        #y_PA_batch: (64,77,13) 包括了start和end字符的标签
         length = tf.reshape(length, [self.batch_size])
         transitions = tf.reshape(tf.concat([transitions] * self.batch_size, 0), [self.batch_size, self.num_classes+1, self.num_classes+1])
+        #observations (64,77,13,1)
         observations = tf.reshape(observations, [self.batch_size, self.num_steps + 2, self.num_classes+1, 1])
+        #observations (77,64,13,1)
         observations = tf.transpose(observations, [1, 0, 2, 3])
 
+        #previous:(64,13,1)
         previous = observations[0, :, :, :]
         alphas = [previous]
         pre_real_tags = []
         for t in range(1, self.num_steps + 2):
             previous = tf.reshape(previous, [self.batch_size, self.num_classes+1, 1])
+            #current:(64,1,13)
             current = tf.reshape(observations[t, :, :, :], [self.batch_size, 1, self.num_classes+1])
+            #alpha_t:(64,13,13)
+            #前一列所有label的分数和当前列所有的分数广播，并且加上转移矩阵，得到上一个词的每个label到当前词的每个label的转移分数总和。
             alpha_t = previous + current + transitions
 
             # collect pre_real_tags
@@ -164,13 +186,22 @@ class LSTM_CRF_PA(object):
             alphas.append(alpha_t)
             previous = alpha_t
             pre_real_tags = []
+        #import pdb
+        #pdb.set_trace()
+        #alphas: 77*(64,13,1)
 
         alphas = tf.reshape(tf.concat(alphas, 0), [self.num_steps + 2, self.batch_size, self.num_classes+1, 1])
+        #alphas: (64,77,13,1)
         alphas = tf.transpose(alphas, [1, 0, 2, 3])
+        #alphas: (64*77,13,1)
         alphas = tf.reshape(alphas, [self.batch_size * (self.num_steps + 2), self.num_classes+1, 1])
+        #tf.range(0, self.batch_size)  扩大倍数加偏移, length为句子实际长度
+        #取每个句子最后一个实际词的label分数
         last_alphas = tf.gather(alphas, tf.range(0, self.batch_size) * (self.num_steps + 2) + length)
+        #last_alphas:(64,13,1)
         last_alphas = tf.reshape(last_alphas, [self.batch_size, self.num_classes+1, 1])
         
+        #取每个句子最后一个词的实际标签
         for ba in range(self.batch_size):
             pre_real_tags.append(y_PA_batch[ba][length[ba]])
         return tf.reduce_sum(self.logsumexp_PA(last_alphas, pre_real_tags, islast=True))
@@ -178,11 +209,15 @@ class LSTM_CRF_PA(object):
 
 
     def forward(self, observations, transitions, length, is_viterbi=True, return_best_seq=True):
+        #import pdb
+        #pdb.set_trace()
+        import pudb;pu.db
         length = tf.reshape(length, [self.batch_size])
         transitions = tf.reshape(tf.concat([transitions] * self.batch_size, 0), [self.batch_size, self.num_classes+1, self.num_classes+1])
         observations = tf.reshape(observations, [self.batch_size, self.num_steps + 2, self.num_classes+1, 1])
         observations = tf.transpose(observations, [1, 0, 2, 3])
         
+        #previous (64,13,1)
         previous = observations[0, :, :, :]
         max_scores = []
         max_scores_pre = []
@@ -196,14 +231,18 @@ class LSTM_CRF_PA(object):
                 max_scores.append(tf.reduce_max(alpha_t, reduction_indices=1))
                 max_scores_pre.append(tf.argmax(alpha_t, dimension=1))
             alpha_t = tf.reshape(self.logsumexp(alpha_t, axis=1), [self.batch_size, self.num_classes+1, 1])
+            #每个time step(current)的logsumexp保存到一个list
             alphas.append(alpha_t)
             previous = alpha_t
-            
+
 
         alphas = tf.reshape(tf.concat(alphas, 0), [self.num_steps + 2, self.batch_size, self.num_classes+1, 1])
+        #alphas (64,77,13,1)
         alphas = tf.transpose(alphas, [1, 0, 2, 3])
+        #alphas (4928,13,1)
         alphas = tf.reshape(alphas, [self.batch_size * (self.num_steps + 2), self.num_classes+1, 1])
 
+        #取batch中每个句子最后一个实际词的logsumexp(不同句子长度不同，所以取到的logsumexp值可能存在于不同的time step)
         last_alphas = tf.gather(alphas, tf.range(0, self.batch_size) * (self.num_steps + 2) + length)
         last_alphas = tf.reshape(last_alphas, [self.batch_size, self.num_classes+1, 1])
 
@@ -212,6 +251,9 @@ class LSTM_CRF_PA(object):
         max_scores = tf.transpose(max_scores, [1, 0, 2])
         max_scores_pre = tf.transpose(max_scores_pre, [1, 0, 2])
 
+        #self.logsumexp(last_alphas, axis=1)     (64,13,1) -> (64,1),
+        #这里的logsumexp为最后一个time的所有路径相加
+        #reduce_sum 计算最终所有句子的得分
         return tf.reduce_sum(self.logsumexp(last_alphas, axis=1)), max_scores, max_scores_pre
 
     
@@ -236,6 +278,8 @@ class LSTM_CRF_PA(object):
         label2id, id2label = utils.loadMap(self.config.map_dict['label2id'])
 
         merged =  tf.summary.merge_all()
+        #import pdb
+        #pdb.set_trace()
 
         num_iterations = int(math.ceil(1.0 * len(X_char_merge_train) / self.batch_size))
         for epoch in range(self.num_epochs):
