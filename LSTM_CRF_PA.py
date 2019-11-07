@@ -1,6 +1,6 @@
 # coding: utf-8
 import codecs
-import os
+import os,pdb
 import math
 import utils
 import numpy as np
@@ -147,7 +147,9 @@ class LSTM_CRF_PA(object):
             select = tf.reshape(select,[-1])
             #从起点出发到其他任一点的分数,select为正确的label位置
             #相当于从(13,13)的矩阵中，取出select对应的那一行
+            #sample (?,13)
             sample = tf.gather(x[i,:,:], select)
+            #计算sample的logsumexp，维度不变，只进行了exp和log，相当于没有变化？不对，是减了x_max之后再进行exp和log的
             result.append(x_max_ + tf.log(tf.reduce_sum(tf.exp(sample - x_max), reduction_indices=0)))
 
         if islast==False:
